@@ -1,0 +1,24 @@
+# BGA to BGG Sync Configuration
+
+# Database settings
+database_path: ~/.bga2bgg/data.db
+
+# Sync settings
+dry_run: false
+auto_confirm_high_confidence: true  # Auto-map games with >95% fuzzy match score
+
+# Player name mappings (BGA username -> BGG username)
+# Map your friends' BGA usernames to their BGG usernames
+# This helps link their plays to their BGG accounts
+player_mappings:
+  # ExampleBGAUsername: ExampleBGGUsername
+  # FriendBGAName: FriendBGGName
+  # Add your friends' mappings here
+
+# Rate limiting
+request_delay: 1  # Seconds between requests to avoid overwhelming servers
+max_retries: 3
+retry_backoff: 2  # Exponential backoff multiplier
+
+# Logging
+log_level: INFO

@@ -1,0 +1,65 @@
+[project]
+name = "bga-to-bgg-sync"
+version = "0.1.0"
+description = "Sync game plays from Board Game Arena to BoardGameGeek"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.8"
+authors = [
+    { name = "BGA to BGG Sync Contributors" }
+]
+keywords = [
+    "board-games",
+    "boardgamegeek",
+    "bgg",
+    "board-game-arena",
+    "bga",
+    "game-tracking",
+    "play-logging",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Board Games",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.1",
+    "fuzzywuzzy>=0.18.0",
+    "python-Levenshtein>=0.21.0",
+    "click>=8.1.0",
+    "tqdm>=4.66.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Funi1234/BGArena_to_BGGeek_Importer"
+Repository = "https://github.com/Funi1234/BGArena_to_BGGeek_Importer"
+Issues = "https://github.com/Funi1234/BGArena_to_BGGeek_Importer/issues"
+
+[project.scripts]
+bga2bgg = "main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+only-include = [
+    "main.py",
+    "config.py",
+    "bga_client.py",
+    "bgg_client.py",
+    "game_mapper.py",
+    "play_tracker.py",
+    "bga_game_names.py",
+]
