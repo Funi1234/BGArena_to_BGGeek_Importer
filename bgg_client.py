@@ -1,10 +1,12 @@
 """BoardGameGeek form submission client."""
 
 import requests
+from secure_session import OriginSession
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 import random
 import time
+from urllib.parse import quote
 
 
 class BGGClient:
@@ -35,8 +37,7 @@ class BGGClient:
         self.max_retries = max_retries
 
         # Create session with cookies
-        self.session = requests.Session()
-        self.session.cookies.update(cookies)
+        self.session = OriginSession("boardgamegeek.com", cookies)
 
         # Set required headers
         self.session.headers.update({
@@ -59,7 +60,7 @@ class BGGClient:
         duration_minutes: Optional[int] = None,
         game_slug: str = "game",
         winner_idx: Optional[int] = None
-    ) -> bool:
+    ) -> Optional[int]:
         """Submit a play to BoardGameGeek.
 
         Args:
@@ -71,7 +72,7 @@ class BGGClient:
             winner_idx: Index of winning player (if known)
 
         Returns:
-            True if submission successful, False otherwise
+            Positive BGG play ID if confirmed, otherwise None.
         """
         # Prepare payload
         payload = self._build_payload(
@@ -83,51 +84,27 @@ class BGGClient:
         )
 
         # Set referer header
-        self.session.headers["referer"] = f"{self.BASE_URL}/boardgame/{game_id}/{game_slug}"
+        self.session.headers["referer"] = f"{self.BASE_URL}/boardgame/{game_id}/{quote(game_slug, safe='')}"
 
-        # Submit with retries
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = self.session.post(
-                    f"{self.BASE_URL}/geekplay.php",
-                    json=payload,
-                    timeout=15
-                )
-
-                # Rate limiting
-                time.sleep(self.request_delay)
-
-                if response.status_code == 200:
-                    # Check response for success
-                    try:
-                        result = response.json()
-                        # BGG returns various success indicators
-                        if isinstance(result, dict) and (result.get("success") or result.get("playid")):
-                            return True
-                    except ValueError:
-                        # Non-JSON response might still be success
-                        if response.text and "error" not in response.text.lower():
-                            return True
-
-                    return True  # Assume success if 200 OK
-
-                elif response.status_code == 401 or response.status_code == 403:
-                    print(f"  Authentication error (attempt {attempt}/{self.max_retries})")
-                    if attempt < self.max_retries:
-                        print("  Cookies may have expired. Please refresh your BGG_COOKIES in .env")
-                        return False
-
-                else:
-                    print(f"  HTTP {response.status_code} (attempt {attempt}/{self.max_retries})")
-                    if attempt < self.max_retries:
-                        time.sleep(self.request_delay * attempt)  # Exponential backoff
-
-            except requests.RequestException as e:
-                print(f"  Network error (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt < self.max_retries:
-                    time.sleep(self.request_delay * attempt)
-
-        return False
+        # A POST can have succeeded even when its response was lost. Never retry it.
+        try:
+            response = self.session.post(
+                f"{self.BASE_URL}/geekplay.php", json=payload, timeout=15
+            )
+            time.sleep(self.request_delay)
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = None
+                if isinstance(result, dict) and not result.get("error"):
+                    play_id = result.get("playid")
+                    if not isinstance(play_id, bool) and str(play_id).isdigit() and int(play_id) > 0:
+                        return int(play_id)
+            print("  Submission outcome is uncertain; check BGG before retrying.")
+        except requests.RequestException as e:
+            print(f"  Submission outcome is uncertain ({e}); check BGG before retrying.")
+        return None
 
     def _build_payload(
         self,
@@ -200,7 +177,7 @@ class BGGClient:
                 player_obj["score"] = str(player_score)
 
             # Mark as winner if this is the winning player
-            if winner_idx is not None and idx == winner_idx:
+            if player.get("win") or (winner_idx is not None and idx == winner_idx):
                 player_obj["win"] = 1
 
             players_array.append(player_obj)
@@ -392,10 +369,10 @@ class BGGClient:
             return []
 
     def test_connection(self) -> bool:
-        """Test if BGG connection and authentication is working.
+        """Test reachability of a public BGG profile (not authentication).
 
         Returns:
-            True if connection successful
+            True if the public profile is reachable
         """
         try:
             # Try to access a user profile page

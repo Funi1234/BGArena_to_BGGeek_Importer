@@ -9,6 +9,8 @@ This guide walks you through extracting the necessary cookie values from your br
 
 ---
 
+Your cookies grant access to your accounts. Keep `.env` private and never share it; on Unix, run `chmod 600 .env`. Git ignores `.env` and `.env.*`, but does not protect already tracked files or backups. The BGG connection check only tests a public page and does not verify authentication.
+
 ## Part 1: Board Game Arena (BGA) Cookies
 
 ### Step 1: Open BGA and DevTools

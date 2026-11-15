@@ -6,7 +6,7 @@ Automatically synchronize your game play history from Board Game Arena (BGA) to 
 
 - 🎮 Fetch game history from Board Game Arena
 - 🎯 Intelligent game mapping with fuzzy search
-- 🔄 Automatic duplicate detection
+- 🔄 Local tracking of imported BGA table IDs
 - 💾 Local caching of game mappings
 - 🎨 Interactive CLI with progress tracking
 - 🧪 Dry-run mode for testing
@@ -96,22 +96,20 @@ BGG_COOKIES={"bggusername": "your_bgg_username_here", "bggpassword": "xxx", "Ses
 
 There are three main workflows depending on your needs:
 
-### Workflow 1: Full Sync (Recommended for First Time)
+### Workflow 1: Full Sync
 
-Import existing BGG plays, then sync new plays from BGA:
+Inspect existing BGG plays, then sync BGA plays:
 
 ```bash
 uv run main.py full-sync
 ```
 
-This prevents duplicates by:
-1. Importing your existing BGG play history into local database
-2. Syncing plays from BGA to BGG (skipping any that already exist)
+BGG's play listing does not provide reliable BGA table IDs, so existing BGG plays cannot be automatically matched to BGA plays. Check your BGG history before syncing to avoid importing plays already logged there. The local database prevents repeat submissions made by this tool.
 
 **Options:**
 - `--dry-run`: Preview what would be submitted
 - `--limit N`: Limit BGA plays to sync
-- `--force`: Re-submit plays even if already in database
+- `--force`: Ignore legacy fingerprints; tracked table IDs remain protected
 
 **Example:**
 ```bash
@@ -121,7 +119,7 @@ uv run main.py full-sync --dry-run
 
 ### Workflow 2: Import from BGG Only
 
-Just import your existing BGG plays into the local database (no BGA sync):
+Inspect your existing BGG plays (no BGA sync):
 
 ```bash
 uv run main.py import-bgg
@@ -130,9 +128,7 @@ uv run main.py import-bgg
 **Options:**
 - `--limit N`: Limit pages to fetch from BGG
 
-**Use this when:**
-- You want to populate the local database before syncing
-- You've manually added plays to BGG and want to prevent re-syncing them
+The listing is informational; it does not mark BGA tables as already submitted.
 
 ### Workflow 3: Sync from BGA to BGG
 
@@ -145,7 +141,7 @@ uv run main.py sync
 **Options:**
 - `--dry-run`: Preview actions without submitting
 - `--limit N`: Process only first N plays
-- `--force`: Re-submit even if already submitted
+- `--force`: Ignore legacy fingerprints; tracked table IDs remain protected
 
 **Examples:**
 ```bash
@@ -156,7 +152,7 @@ uv run main.py sync --dry-run --limit 10
 uv run main.py sync --limit 50
 
 # Force re-submit all plays
-uv run main.py sync --force
+uv run main.py sync --force  # Ignore legacy fingerprints
 ```
 
 ### Game Mapping
@@ -206,17 +202,25 @@ uv run main.py reset-history
 
 1. **Fetch from BGA**: Retrieves your game history using BGA's internal API
 2. **Map Games**: First-time games are mapped to BGG through interactive search
-3. **Check Duplicates**: Prevents re-submitting plays you've already logged
+3. **Check Local History**: Skips BGA tables already tracked by this installation
 4. **Transform Data**: Converts BGA play data to BGG's expected format
 5. **Submit to BGG**: Posts plays to BGG via their web form endpoint
 6. **Track Submissions**: Records successful submissions to prevent duplicates
+
+Only a response with a positive BGG play ID is treated as confirmed; other responses are uncertain, including a generic success flag. If a submission has an uncertain outcome, check the play on BGG before continuing. The table stays blocked, including with `--force`. After checking, run `uv run main.py resolve-submission TABLE_ID submitted` if the play exists, or `uv run main.py resolve-submission TABLE_ID retry` if it does not. A lost database or resetting history removes this protection.
+
+### Roll back an import batch
+
+New confirmed submissions record their BGG play IDs and an import batch ID. Run `uv run main.py rollback` to list available plays and batches, then `uv run main.py rollback BATCH_ID` to preview one batch. To request deletion of its listed plays, run `uv run main.py rollback BATCH_ID --confirm` and answer the confirmation prompt.
+
+Deletion requests are not automatically verified. For each pending play, check BGG, then run `uv run main.py resolve-rollback TABLE_ID deleted` if it is gone, or `uv run main.py resolve-rollback TABLE_ID present` if it remains. A pending deletion blocks resubmission. Resolving it as deleted removes the local submission record, allowing a later sync to import it again. Plays imported before BGG play IDs were recorded, including manually resolved submissions, cannot be rolled back with this command. Back up the local database; resetting history removes rollback records. Existing tracked table IDs cannot be overwritten with `--force` because doing so would lose their rollback information.
 
 ## Data Storage
 
 All data is stored locally in a SQLite database at `~/.bga2bgg/data.db`:
 
 - **Game Mappings**: BGA game name → BGG game ID
-- **Submitted Plays**: Hash of each submitted play to prevent duplicates
+- **Submitted Plays**: BGA table IDs and submission status to prevent repeat submissions
 
 ## Troubleshooting
 
@@ -287,11 +291,12 @@ log_level: INFO
 - **Cookie Expiration**: Cookies expire and need to be refreshed periodically
 - **Game Mapping**: Some games may require manual mapping if names differ significantly
 - **Date Formats**: BGA date parsing may need adjustment for different locales
-- **Duplicate Detection**: Uses game ID, date, players, and duration to identify duplicates. If you play the exact same game multiple times with identical players and duration on the same day, only the first will be submitted (unless using `--force`)
+- **Duplicate Detection**: Uses BGA table IDs for new submissions. Legacy records are matched conservatively by their old fingerprint, which can suppress a distinct play. Existing BGG plays cannot be matched reliably to BGA tables.
+- **Abandoned Games**: Tables without an end time are skipped, but completed tables that were abandoned cannot currently be identified reliably.
 
 ## Privacy & Security
 
-- Cookies are stored locally in `.env` (never committed to git)
+- Cookies in `.env` grant access to your accounts. Keep the file private, do not share it, and restrict access (on Unix: `chmod 600 .env`). `.env` and `.env.*` are ignored by git, but gitignore does not protect already tracked files or backups. The BGG connection check only tests a public page; it does not verify authentication.
 - No data is sent to third parties
 - All operations are local or direct to BGA/BGG
 

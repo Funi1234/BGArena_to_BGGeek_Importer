@@ -1,6 +1,7 @@
 """Board Game Arena API client."""
 
 import requests
+from secure_session import OriginSession
 from typing import List, Dict, Any, Optional
 import json
 import time
@@ -24,8 +25,7 @@ class BGAClient:
         self.request_delay = request_delay
 
         # Create session with cookies
-        self.session = requests.Session()
-        self.session.cookies.update(cookies)
+        self.session = OriginSession("boardgamearena.com", cookies)
 
         # Set required headers
         self.session.headers.update({
@@ -124,30 +124,37 @@ class BGAClient:
         start_timestamp = int(table.get("start", 0))
         end_timestamp = int(table.get("end", 0))
 
-        # Convert to date
-        if end_timestamp:
-            play_date = datetime.fromtimestamp(end_timestamp).strftime("%Y-%m-%d")
-        else:
-            play_date = None
+        # An unfinished table cannot represent a completed play.
+        if not end_timestamp:
+            return None
 
-        # Calculate duration in minutes
-        duration = None
-        if start_timestamp and end_timestamp:
-            duration = (end_timestamp - start_timestamp) // 60
+        play_date = datetime.fromtimestamp(end_timestamp).strftime("%Y-%m-%d")
 
         # Parse players
         player_names = table.get("player_names", "").split(",")
         scores = table.get("scores", "").split(",")
         ranks = table.get("ranks", "").split(",")
 
+        def parse_integer(values, index):
+            try:
+                return int(values[index])
+            except (IndexError, ValueError, TypeError):
+                return None
+
         # Build player list with scores
         players = []
+        player_details = []
         for i, name in enumerate(player_names):
             if name:
                 player_info = name.strip()
                 if i < len(scores) and scores[i]:
                     player_info += f" ({scores[i]})"
                 players.append(player_info)
+                player_details.append({
+                    "name": name.strip(),
+                    "score": parse_integer(scores, i),
+                    "rank": parse_integer(ranks, i),
+                })
 
         return {
             "id": table_id,
@@ -157,7 +164,7 @@ class BGAClient:
             "players": players,
             "scores": scores,
             "ranks": ranks,
-            "duration": duration,
+            "player_details": player_details,
             "start_timestamp": start_timestamp,
             "end_timestamp": end_timestamp
         }
@@ -188,7 +195,8 @@ class BGAClient:
 
             games = self.parse_games_json(response)
 
-            if not games:
+            tables = response.get("data", {}).get("tables", [])
+            if not tables:
                 consecutive_empty_pages += 1
                 print(f"empty ({consecutive_empty_pages}/{max_empty_pages})")
 
@@ -198,7 +206,7 @@ class BGAClient:
             else:
                 consecutive_empty_pages = 0
                 all_games.extend(games)
-                print(f"found {len(games)} games (total: {len(all_games)})")
+                print(f"found {len(games)} completed games (total: {len(all_games)})")
 
                 if limit and len(all_games) >= limit:
                     all_games = all_games[:limit]
