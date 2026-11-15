@@ -57,9 +57,11 @@ packages = ["."]
 only-include = [
     "main.py",
     "config.py",
+    "secure_session.py",
     "bga_client.py",
     "bgg_client.py",
     "game_mapper.py",
     "play_tracker.py",
+    "play_conversion.py",
     "bga_game_names.py",
 ]

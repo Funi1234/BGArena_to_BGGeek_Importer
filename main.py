@@ -4,6 +4,7 @@
 import click
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from tqdm import tqdm
@@ -11,6 +12,7 @@ from tqdm import tqdm
 from config import Config
 from bga_client import BGAClient
 from bgg_client import BGGClient
+from play_conversion import build_player_data
 from game_mapper import GameMapper
 from play_tracker import PlayTracker
 
@@ -24,7 +26,7 @@ def cli():
 @cli.command()
 @click.option('--dry-run', is_flag=True, help='Preview actions without submitting to BGG')
 @click.option('--limit', type=int, help='Maximum number of plays to process')
-@click.option('--force', is_flag=True, help='Re-submit plays even if already submitted')
+@click.option('--force', is_flag=True, help='Ignore legacy fingerprints (tracked table IDs remain protected)')
 def sync(dry_run: bool, limit: Optional[int], force: bool):
     """Sync plays from BGA to BGG."""
 
@@ -60,13 +62,17 @@ def sync(dry_run: bool, limit: Optional[int], force: bool):
     # Test BGG connection
     click.echo("🔌 Testing BGG connection...")
     if not bgg.test_connection():
-        click.echo("❌ BGG connection failed. Please check your cookies.", err=True)
+        click.echo("❌ BGG connection failed. Please check network access.", err=True)
         sys.exit(1)
-    click.echo("✅ BGG connection successful")
+    click.echo("✅ BGG connection successful (authentication has not been verified)")
 
     # Initialize database components
     mapper = GameMapper(config.database_path, config.auto_confirm_high_confidence, config.bgg_cookies, bga)
     tracker = PlayTracker(config.database_path)
+
+    batch_id = uuid.uuid4().hex
+    if not config.dry_run:
+        click.echo(f"Import batch: {batch_id}")
 
     # Fetch games from BGA
     click.echo(f"\n📥 Fetching games from BGA...")
@@ -115,89 +121,46 @@ def sync(dry_run: bool, limit: Optional[int], force: bool):
 
             bgg_id, bgg_name = mapping
 
-            # Get players and map BGA username to BGG username
-            # Also extract scores from player names
-            bga_players = game.get('players', [])
-
-            # Parse players with scores: "SnowSnep (63)" -> {name: "SnowSnep", score: 63}
-            player_data = []
-            for player_str in bga_players:
-                # Extract name and score
-                if '(' in player_str:
-                    parts = player_str.split('(')
-                    player_name = parts[0].strip()
-                    score_str = parts[1].rstrip(')').strip()
-                    # Handle negative scores and non-numeric values
-                    try:
-                        score = int(score_str)
-                    except ValueError:
-                        score = None
-                else:
-                    player_name = player_str.strip()
-                    score = None
-
-                # Map BGA username to BGG username
-                bgg_username = None
-                if player_name == config.bga_username:
-                    # Current user
-                    mapped_player_name = config.bgg_username
-                    bgg_username = config.bgg_username
-                elif player_name in config.player_mappings:
-                    # Mapped friend
-                    mapped_player_name = config.player_mappings[player_name]
-                    bgg_username = mapped_player_name  # Assume mapped name is their BGG username
-                else:
-                    # No mapping, use BGA name as-is
-                    mapped_player_name = player_name
-
-                player_data.append({
-                    'name': mapped_player_name,
-                    'username': bgg_username,
-                    'score': score
-                })
-
-            # Ensure user is in the list (should already be there from BGA)
-            if not any(p['name'] == config.bgg_username for p in player_data):
-                player_data.insert(0, {'name': config.bgg_username, 'score': None})
-
-            # Determine winner (highest score)
-            # Find player with highest score
-            max_score = None
-            winner_idx = None
-            for idx, p in enumerate(player_data):
-                if p['score'] is not None:
-                    if max_score is None or p['score'] > max_score:
-                        max_score = p['score']
-                        winner_idx = idx
-
-            # Check for duplicate (includes duration to distinguish multiple plays on same day)
+            player_data = build_player_data(game, config)
             player_names = [p['name'] for p in player_data]
-            duration = game.get('duration')
-            if not force and tracker.is_duplicate(bgg_id, play_date, player_names, duration):
+            duration = game.get('duration')  # Only for conservative legacy matching.
+            table_id = game.get('id')
+            status = tracker.table_status(table_id)
+            if not table_id:
+                click.echo(f"\n⚠️  Skipping {bgg_name}: missing BGA table ID")
+                stats["failed"] += 1
+                continue
+            if status == "pending":
+                click.echo(f"\n⚠️  Table {table_id} has a pending submission or rollback; check BGG and resolve it before syncing.")
+                stats["failed"] += 1
+                continue
+            if status or (not force and tracker.is_duplicate(bgg_id, play_date, player_names, duration)):
                 stats["skipped_duplicate"] += 1
                 continue
 
             # Submit to BGG
             if config.dry_run:
                 score_info = f" (scores: {', '.join([str(p['score']) for p in player_data])})" if any(p['score'] for p in player_data) else ""
-                winner_info = f" - Winner: {player_data[winner_idx]['name']}" if winner_idx is not None else ""
+                winner_info = ""
                 click.echo(f"\n[DRY RUN] Would submit: {bgg_name} on {play_date} with {len(player_data)} players{score_info}{winner_info}")
                 stats["submitted"] += 1
             else:
+                if not tracker.begin_submission(table_id, bgg_id, play_date, player_names, duration, game['name'], force):
+                    click.echo(f"\n⚠️  Table {table_id} is already tracked or needs reconciliation.")
+                    stats["failed"] += 1
+                    continue
                 success = bgg.submit_play(
                     game_id=bgg_id,
                     play_date=play_date,
                     players=player_data,
-                    duration_minutes=game.get('duration'),
-                    game_slug=bgg_name.lower().replace(' ', '-'),
-                    winner_idx=winner_idx
+                    game_slug=bgg_name.lower().replace(' ', '-')
                 )
 
                 if success:
-                    tracker.record_play(bgg_id, play_date, player_names, duration, game['name'])
+                    tracker.finish_submission(table_id, game['name'], success, batch_id)
                     stats["submitted"] += 1
                 else:
-                    click.echo(f"\n❌ Failed to submit: {bgg_name} on {play_date}")
+                    click.echo(f"\n⚠️ Submission uncertain: {bgg_name} on {play_date}; check BGG and use resolve-submission")
                     stats["failed"] += 1
 
     # Print summary
@@ -396,13 +359,13 @@ def delete_play(play_id: str, confirm: bool):
 @cli.command()
 @click.option('--dry-run', is_flag=True, help='Preview actions without actually submitting to BGG')
 @click.option('--limit', type=int, help='Maximum number of plays to process')
-@click.option('--force', is_flag=True, help='Re-submit plays even if already submitted')
+@click.option('--force', is_flag=True, help='Ignore legacy fingerprints (tracked table IDs remain protected)')
 def full_sync(dry_run: bool, limit: Optional[int], force: bool):
     """Full sync: Import BGG plays to local DB, then sync BGA plays to BGG.
 
-    This is the recommended workflow to prevent duplicates:
-    1. Import existing plays from BGG into local database
-    2. Sync new plays from BGA to BGG (skipping duplicates)
+    Inspect existing BGG plays, then sync BGA plays.
+
+    BGG plays cannot be matched reliably to BGA tables automatically.
     """
 
     try:
@@ -419,9 +382,13 @@ def full_sync(dry_run: bool, limit: Optional[int], force: bool):
     click.echo("🔄 Full Sync: BGG → Local → BGA → BGG")
     click.echo("=" * 60)
 
+    batch_id = uuid.uuid4().hex
+    if not config.dry_run:
+        click.echo(f"Import batch: {batch_id}")
+
     # Step 1: Import from BGG
     click.echo("\n📥 Step 1/2: Importing existing plays from BGG...")
-    click.echo("⚠️  Note: This may take a while with rate limiting\n")
+    click.echo("⚠️  BGG plays cannot be matched to BGA tables automatically; check existing plays before syncing.\n")
 
     bgg = BGGClient(
         username=config.bgg_username,
@@ -479,14 +446,13 @@ def full_sync(dry_run: bool, limit: Optional[int], force: bool):
             except Exception:
                 continue
 
-            if not tracker.is_duplicate(bgg_id, play_date_iso, players):
-                tracker.record_play(bgg_id, play_date_iso, players, duration=None, bga_game_name=None)
-                bgg_imported += 1
+            # Scraped entries lack BGA table IDs and cannot be matched safely.
+            bgg_imported += 1
 
         bgg_page += 1
         time.sleep(config.request_delay)
 
-    click.echo(f"✅ Step 1 Complete: Imported {bgg_imported} plays from BGG\n")
+    click.echo(f"⚠️ Step 1 Complete: Found {bgg_imported} BGG plays; these cannot be reconciled automatically\n")
 
     # Step 2: Sync from BGA to BGG
     click.echo("📥 Step 2/2: Syncing plays from BGA to BGG...\n")
@@ -499,7 +465,7 @@ def full_sync(dry_run: bool, limit: Optional[int], force: bool):
 
     # Test BGG connection
     if not bgg.test_connection():
-        click.echo("❌ BGG connection failed. Please check your cookies.", err=True)
+        click.echo("❌ BGG connection failed. Please check network access.", err=True)
         sys.exit(1)
 
     mapper = GameMapper(config.database_path, config.auto_confirm_high_confidence, config.bgg_cookies, bga)
@@ -543,72 +509,42 @@ def full_sync(dry_run: bool, limit: Optional[int], force: bool):
                     continue
 
             bgg_id, bgg_name = mapping
-            bga_players = game.get('players', [])
-
-            player_data = []
-            for player_str in bga_players:
-                if '(' in player_str:
-                    parts = player_str.split('(')
-                    player_name = parts[0].strip()
-                    score_str = parts[1].rstrip(')').strip()
-                    try:
-                        score = int(score_str)
-                    except ValueError:
-                        score = None
-                else:
-                    player_name = player_str.strip()
-                    score = None
-
-                bgg_username = None
-                if player_name == config.bga_username:
-                    mapped_player_name = config.bgg_username
-                    bgg_username = config.bgg_username
-                elif player_name in config.player_mappings:
-                    mapped_player_name = config.player_mappings[player_name]
-                    bgg_username = mapped_player_name
-                else:
-                    mapped_player_name = player_name
-
-                player_data.append({
-                    'name': mapped_player_name,
-                    'username': bgg_username,
-                    'score': score
-                })
-
-            if not any(p['name'] == config.bgg_username for p in player_data):
-                player_data.insert(0, {'name': config.bgg_username, 'score': None})
-
-            max_score = None
-            winner_idx = None
-            for idx, p in enumerate(player_data):
-                if p['score'] is not None:
-                    if max_score is None or p['score'] > max_score:
-                        max_score = p['score']
-                        winner_idx = idx
-
+            player_data = build_player_data(game, config)
             player_names = [p['name'] for p in player_data]
-            duration = game.get('duration')
-
-            if not force and tracker.is_duplicate(bgg_id, play_date, player_names, duration):
+            duration = game.get('duration')  # Only for conservative legacy matching.
+            table_id = game.get('id')
+            status = tracker.table_status(table_id)
+            if not table_id:
+                click.echo(f"\n⚠️  Skipping {bgg_name}: missing BGA table ID")
+                stats["failed"] += 1
+                continue
+            if status == "pending":
+                click.echo(f"\n⚠️  Table {table_id} has a pending submission or rollback; check BGG and resolve it before syncing.")
+                stats["failed"] += 1
+                continue
+            if status or (not force and tracker.is_duplicate(bgg_id, play_date, player_names, duration)):
                 stats["skipped_duplicate"] += 1
                 continue
 
             if config.dry_run:
                 stats["submitted"] += 1
             else:
+                if not tracker.begin_submission(table_id, bgg_id, play_date, player_names, duration, game['name'], force):
+                    click.echo(f"\n⚠️  Table {table_id} is already tracked or needs reconciliation.")
+                    stats["failed"] += 1
+                    continue
                 success = bgg.submit_play(
                     game_id=bgg_id,
                     play_date=play_date,
                     players=player_data,
-                    duration_minutes=duration,
-                    game_slug=bgg_name.lower().replace(' ', '-'),
-                    winner_idx=winner_idx
+                    game_slug=bgg_name.lower().replace(' ', '-')
                 )
 
                 if success:
-                    tracker.record_play(bgg_id, play_date, player_names, duration, game['name'])
+                    tracker.finish_submission(table_id, game['name'], success, batch_id)
                     stats["submitted"] += 1
                 else:
+                    click.echo(f"\n⚠️ Submission uncertain for table {table_id}; check BGG and use resolve-submission.")
                     stats["failed"] += 1
 
     click.echo(f"\n" + "=" * 60)
@@ -620,13 +556,69 @@ def full_sync(dry_run: bool, limit: Optional[int], force: bool):
         click.echo(f"\n💡 This was a dry run. Use without --dry-run to actually submit plays.")
 
 
+@cli.command('rollback')
+@click.argument('batch_id', required=False)
+@click.option('--confirm', is_flag=True, help='Send deletion requests for the displayed batch')
+def rollback(batch_id, confirm):
+    """List tracked plays, preview a BATCH_ID, or request its deletion."""
+    if confirm and not batch_id:
+        raise click.UsageError('--confirm requires a batch ID')
+    config = Config()
+    tracker = PlayTracker(config.database_path)
+    records = tracker.rollback_records(batch_id)
+    if not records:
+        click.echo('No tracked plays found for rollback.')
+        return
+    for batch, key, name, date, play_id, state in records:
+        click.echo(f'Batch {batch} | BGA table {key[4:]} | {name} | {date} | BGG play {play_id} | {state or "ready"}')
+    if not confirm:
+        click.echo('Preview only. Use rollback BATCH_ID --confirm to request deletion.')
+        return
+    click.confirm('Request deletion of the ready plays shown above?', abort=True)
+    bgg = BGGClient(config.bgg_username, config.bgg_user_id, config.bgg_cookies,
+                    request_delay=config.request_delay, max_retries=config.max_retries)
+    for batch, key, name, date, play_id, state in records:
+        if not tracker.begin_rollback(key, play_id):
+            click.echo(f'Skipping {play_id}: already awaiting verification.')
+            continue
+        bgg.delete_play(play_id)
+        click.echo(f'Check BGG play {play_id}; then run resolve-rollback {key[4:]} deleted or present.')
+    click.echo('Deletion outcomes require manual verification; pending plays remain blocked from sync.')
+
+
+@cli.command('resolve-rollback')
+@click.argument('table_id')
+@click.argument('resolution', type=click.Choice(['deleted', 'present']))
+def resolve_rollback(table_id, resolution):
+    """After checking BGG, mark a pending deletion deleted or still present."""
+    config = Config()
+    tracker = PlayTracker(config.database_path)
+    if not tracker.resolve_rollback(table_id, resolution):
+        raise click.ClickException('No pending rollback found for that table ID.')
+    click.echo(f'Resolved rollback for table {table_id}: {resolution}.')
+
+
+@cli.command('resolve-submission')
+@click.argument('table_id')
+@click.argument('resolution', type=click.Choice(['submitted', 'retry']))
+def resolve_submission(table_id, resolution):
+    """Resolve an uncertain TABLE_ID after checking BGG manually.
+
+    Use submitted if the play exists, or retry if it does not.
+    """
+    config = Config()
+    tracker = PlayTracker(config.database_path)
+    if not tracker.resolve_submission(table_id, resolution):
+        raise click.ClickException("No uncertain submission found for that table ID.")
+    click.echo(f"Resolved table {table_id}: {resolution}.")
+
+
 @cli.command()
 @click.option('--limit', type=int, help='Maximum number of pages to fetch')
 def import_bgg(limit: Optional[int]):
-    """Import existing BGG plays into local database.
+    """Inspect existing BGG plays without matching them to BGA tables.
 
-    Use this to populate your local database with plays already on BGG.
-    This prevents re-submitting duplicates when you sync from BGA.
+    These entries cannot be matched reliably to BGA tables automatically.
     """
 
     try:
@@ -716,18 +708,18 @@ def import_bgg(limit: Optional[int]):
                 continue
 
             # Import into database
-            tracker.record_play(bgg_id, play_date_iso, players, duration=None, bga_game_name=None)
+            # Scraped entries lack BGA table IDs and cannot be matched safely.
             total_imported += 1
             # Show progress every 10 imports
             if total_imported % 10 == 0:
-                click.echo(f"  ✅ Imported {total_imported} plays so far...")
+                click.echo(f"  Found {total_imported} plays so far...")
 
         page += 1
         time.sleep(config.request_delay)
 
     click.echo(f"\n📊 BGG Import Complete:")
-    click.echo(f"  ✅ Imported: {total_imported} plays")
-    click.echo(f"  ⏭️  Skipped: {total_skipped} plays (already in database)")
+    click.echo(f"  ⚠️ Found: {total_imported} plays (not matched to BGA tables)")
+    click.echo(f"  ⏭️  Skipped: {total_skipped} plays (invalid or already in database)")
     click.echo(f"\n💡 Tip: Run 'uv run main.py sync' to sync plays from BGA to BGG")
 
 

@@ -2,12 +2,14 @@
 
 import sqlite3
 import requests
+from secure_session import OriginSession
 import re
 import json
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
 from datetime import datetime
+from urllib.parse import urlencode
 from fuzzywuzzy import fuzz
 from bs4 import BeautifulSoup
 from bga_game_names import get_display_name, get_bgg_id
@@ -30,7 +32,7 @@ class GameMapper:
         self.bga_client = bga_client
 
         # Create session with proper headers and cookies
-        self.session = requests.Session()
+        self.session = OriginSession("boardgamegeek.com", bgg_cookies or {})
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
@@ -41,10 +43,6 @@ class GameMapper:
             "sec-fetch-site": "same-origin",
             "sec-gpc": "1"
         })
-
-        # Add BGG cookies if provided
-        if bgg_cookies:
-            self.session.cookies.update(bgg_cookies)
 
         self._init_database()
 
@@ -114,7 +112,7 @@ class GameMapper:
         }
 
         # Set referer header
-        self.session.headers["referer"] = f"https://boardgamegeek.com/geeksearch.php?action=search&objecttype=boardgame&q={query}"
+        self.session.headers["referer"] = "https://boardgamegeek.com/geeksearch.php?" + urlencode({"action": "search", "objecttype": "boardgame", "q": query})
 
         try:
             response = self.session.get(url, params=params, timeout=15)
